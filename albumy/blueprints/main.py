@@ -19,6 +19,13 @@ from albumy.models import User, Photo, Tag, Follow, Collect, Comment, Notificati
 from albumy.notifications import push_comment_notification, push_collect_notification
 from albumy.utils import rename_image, resize_image, redirect_back, flash_errors
 
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import requests
+import torch
+import json
+import piexif
+from PIL import Image
+
 main_bp = Blueprint('main', __name__)
 
 
@@ -38,6 +45,78 @@ def index():
         photos = None
     tags = Tag.query.join(Tag.photos).group_by(Tag.id).order_by(func.count(Photo.id).desc()).limit(10)
     return render_template('main/index.html', pagination=pagination, photos=photos, tags=tags, Collect=Collect)
+
+def generate_alt_text(image,processor,model):
+    inputs = processor(image, return_tensors="pt")
+    out = model.generate(**inputs)
+    alternative_text = processor.decode(out[0], skip_special_tokens=True)
+    return alternative_text
+
+
+def detect_objects(image_path,model):
+    """
+    Detect objects in the image using YOLOv5 and return a list of detected object names.
+    """
+    results = model(image_path)  # Run detection
+    detected_objects = results.pandas().xywh[0]['name'].tolist()  # Extract object names
+    return detected_objects
+
+def save_metadata(image_path, detected_objects):
+    """
+    Save detected objects into image metadata (Exif).
+    """
+    img = Image.open(image_path)
+
+    # Convert detected objects list to JSON string
+    metadata = {"detected_objects": detected_objects}
+    metadata_str = json.dumps(metadata)
+
+    # Load existing Exif data safely
+    exif_data = img.info.get("exif", None)
+    if exif_data:
+        exif_dict = piexif.load(exif_data)
+    else:
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}, "thumbnail": None}
+
+    # Store metadata in UserComment field
+    exif_dict["Exif"][piexif.ExifIFD.UserComment] = metadata_str.encode("utf-8")
+
+    # Save image with updated metadata
+    exif_bytes = piexif.dump(exif_dict)
+    img.save(image_path, "jpeg", exif=exif_bytes)
+    print(f"Metadata saved: {metadata_str}")
+
+def read_metadata(image_path):
+    """
+    Read and parse detected objects from image metadata.
+    """
+    try:
+        img = Image.open(image_path)
+        exif_data = img.info.get("exif", None)
+        if exif_data:
+            exif_dict = piexif.load(exif_data)
+            metadata_str = exif_dict["Exif"].get(piexif.ExifIFD.UserComment, b"").decode("utf-8")
+            metadata = json.loads(metadata_str)
+            return metadata.get("detected_objects", [])
+    except (KeyError, json.JSONDecodeError, FileNotFoundError):
+        return []
+    return []
+
+def search_images(directory, keyword):
+    """
+    Search for images in a directory that contain the given keyword in their metadata.
+    """
+    matching_images = []
+    
+    for filename in os.listdir(directory):
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):  # Process only image files
+            image_path = os.path.join(directory, filename)
+            detected_objects = read_metadata(image_path)
+            
+            if keyword.lower() in [obj.lower() for obj in detected_objects]:
+                matching_images.append(filename)
+    
+    return matching_images
 
 
 @main_bp.route('/explore')
@@ -125,11 +204,29 @@ def upload():
         f.save(os.path.join(current_app.config['ALBUMY_UPLOAD_PATH'], filename))
         filename_s = resize_image(f, filename, current_app.config['ALBUMY_PHOTO_SIZE']['small'])
         filename_m = resize_image(f, filename, current_app.config['ALBUMY_PHOTO_SIZE']['medium'])
+        processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+        model2 = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+        img=Image.open(os.path.join(current_app.config['ALBUMY_UPLOAD_PATH'], filename))
+        alternative_text=generate_alt_text(img,processor,model)
+        detected_objs=list(set(detect_objects(os.path.join(current_app.config['ALBUMY_UPLOAD_PATH'], filename),model2)))
+        save_metadata(os.path.join(current_app.config['ALBUMY_UPLOAD_PATH'], filename), detected_objs)    
+        tags=[]
+        for tag_name in detected_objs:
+            tag = Tag.query.filter_by(name=tag_name).first()
+            # If the tag does not exist, create it
+            if not tag:
+                tag = Tag(name=tag_name)    
+            tags.append(tag)
+        if not tags:
+            tags = Tag(name="Uncategorized")
         photo = Photo(
+            description=alternative_text,
             filename=filename,
             filename_s=filename_s,
             filename_m=filename_m,
-            author=current_user._get_current_object()
+            author=current_user._get_current_object(),
+            tags=tags
         )
         db.session.add(photo)
         db.session.commit()
