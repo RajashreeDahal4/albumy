@@ -12,7 +12,7 @@ Demo: http://albumy.helloflask.com
 
 clone:
 ```
-$ git clone https://github.com/greyli/albumy.git
+$ git clone https://github.com/RajashreeDahal4/albumy.git
 $ cd albumy
 ```
 create & activate virtual env then install dependency:
@@ -31,7 +31,7 @@ $ pipenv shell
 generate fake data then run:
 ```
 $ flask forge
-$ flask run
+$ flask run --no-reload
 * Running on http://127.0.0.1:5000/
 ```
 Test account:
