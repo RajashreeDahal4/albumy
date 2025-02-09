@@ -28,6 +28,11 @@ or with Pipenv:
 $ pipenv install --dev
 $ pipenv shell
 ```
+To add installed additional libraries to requirements.txt
+```
+pip freeze > requirements.txt
+```
+
 generate fake data then run:
 ```
 $ flask forge
